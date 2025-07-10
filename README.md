@@ -1,15 +1,14 @@
 # Monome Arc Web Client
 
-A web-based client for the Monome Arc using Deno and the Web Serial API. This project allows you to connect directly to a Monome Arc device from your web browser without needing serialosc middleware.
+A minimal web-based client for the Monome Arc using Deno and the Web Serial API. This project allows you to connect directly to a Monome Arc device from your web browser without needing serialosc middleware.
 
 ## Features
 
 - Direct Web Serial API connection to Monome Arc
 - Real-time encoder position tracking
-- Visual LED ring feedback
+- Minimal visual interface for LED ring feedback
 - Support for 2025 edition pushbutton
-- Interactive LED control via clicking
-- Adjustable brightness control
+- Basic LED control
 - Real-time logging
 
 ## Requirements
@@ -54,9 +53,8 @@ A web-based client for the Monome Arc using Deno and the Web Serial API. This pr
 
 ### Interacting
 - **Encoders**: Turn the physical knobs to see real-time updates
-- **LEDs**: Click anywhere on the visual LED rings to toggle individual LEDs
-- **Pushbutton**: Press the center button (2025 edition) to see feedback
-- **Brightness**: Use the slider to adjust global LED brightness
+- **LEDs**: Basic visual feedback on the minimal interface
+- **Pushbutton**: Press the center button (2025 edition) to see feedback in the log
 
 ### Monitoring
 - All encoder movements and button presses are logged in real-time
