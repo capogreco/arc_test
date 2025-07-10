@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arc Control</title>
+    <style>
+        body {
+            font-family: 'Monaco', 'Courier New', monospace;
+            background: #000;
+            color: #0f0;
+            margin: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+
+        .status {
+            font-size: 18px;
+            margin-bottom: 20px;
+        }
+
+        .connected {
+            color: #0f0;
+        }
+
+        .disconnected {
+            color: #f00;
+        }
+
+        button {
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 10px 20px;
+            cursor: pointer;
+            margin: 5px;
+            font-family: inherit;
+            font-size: 16px;
+        }
+
+        button:hover {
+            background: #0f0;
+            color: #000;
+        }
+
+        button:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        .controls {
+            margin-bottom: 30px;
+        }
+
+        .arc-display {
+            display: flex;
+            gap: 30px;
+            margin: 30px 0;
+        }
+
+        .ring {
+            position: relative;
+            width: 150px;
+            height: 150px;
+        }
+
+        .ring-label {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 14px;
+        }
+
+        .led {
+            position: absolute;
+            width: 3px;
+            height: 10px;
+            background: #030;
+            border-radius: 1px;
+            top: 0;
+            left: 50%;
+            transform-origin: center 75px;
+        }
+
+        .led.on {
+            background: #0f0;
+            box-shadow: 0 0 5px #0f0;
+        }
+
+        .encoder-value {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+
+        .log {
+            width: 90%;
+            max-width: 800px;
+            height: 200px;
+            background: #000;
+            border: 1px solid #0f0;
+            padding: 10px;
+            overflow-y: auto;
+            font-size: 12px;
+            white-space: pre-wrap;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Arc Control</h1>
+    
+    <div class="status">
+        Status: <span id="status" class="disconnected">Disconnected</span>
+    </div>
+
+    <div class="controls">
+        <button id="connectBtn">Connect</button>
+        <button id="disconnectBtn" disabled>Disconnect</button>
+    </div>
+
+    <div class="arc-display" id="arcDisplay"></div>
+
+    <div class="log" id="log"></div>
+
+    <script>
+        class ArcControl {
+            constructor() {
+                this.port = null;
+                this.reader = null;
+                this.writer = null;
+                this.connected = false;
+                this.controlled = false;
+                this.encoderValues = [0, 0, 0, 0];
+                this.ledStates = Array(4).fill().map(() => Array(64).fill(0));
+                
+                this.initUI();
+                this.initEventListeners();
+            }
+
+            initUI() {
+                const display = document.getElementById('arcDisplay');
+                for (let i = 0; i < 4; i++) {
+                    const ringDiv = document.createElement('div');
+                    ringDiv.innerHTML = `
+                        <div class="ring" id="ring${i}">
+                            <div class="ring-label">E${i + 1}</div>
+                            ${this.createLEDs()}
+                        </div>
+                        <div class="encoder-value" id="enc${i}">0</div>
+                    `;
+                    display.appendChild(ringDiv);
+                }
+            }
+
+            createLEDs() {
+                let html = '';
+                for (let i = 0; i < 64; i++) {
+                    // Start at 12 o'clock (0 degrees) instead of 9 o'clock (-90 degrees)
+                    const angle = (i * 360 / 64);
+                    html += `<div class="led" style="transform: rotate(${angle}deg) translateY(-75px);"></div>`;
+                }
+                return html;
+            }
+
+            initEventListeners() {
+                document.getElementById('connectBtn').addEventListener('click', () => this.connect());
+                document.getElementById('disconnectBtn').addEventListener('click', () => this.disconnect());
+            }
+
+            async connect() {
+                try {
+                    this.port = await navigator.serial.requestPort();
+                    await this.port.open({ baudRate: 115200 });
+                    
+                    this.reader = this.port.readable.getReader();
+                    this.writer = this.port.writable.getWriter();
+                    this.connected = true;
+                    
+                    this.updateStatus();
+                    this.log('Connected to Arc');
+                    
+                    this.readLoop();
+                    
+                    // Automatically take control after successful connection
+                    // Try without delay first - add it back if there are issues
+                    await this.takeControl();
+                    
+                } catch (error) {
+                    this.log(`Connection failed: ${error.message}`);
+                }
+            }
+
+            async disconnect() {
+                if (this.reader) {
+                    await this.reader.cancel();
+                    this.reader = null;
+                }
+                if (this.writer) {
+                    await this.writer.close();
+                    this.writer = null;
+                }
+                if (this.port) {
+                    await this.port.close();
+                    this.port = null;
+                }
+                
+                this.connected = false;
+                this.controlled = false;
+                this.updateStatus();
+                this.log('Disconnected');
+            }
+
+            async readLoop() {
+                try {
+                    while (this.connected && this.reader) {
+                        const { value, done } = await this.reader.read();
+                        if (done) break;
+                        
+                        this.processData(value);
+                    }
+                } catch (error) {
+                    this.log(`Read error: ${error.message}`);
+                }
+            }
+
+            processData(data) {
+                // Check if it's text
+                let isText = true;
+                for (let i = 0; i < data.length; i++) {
+                    const byte = data[i];
+                    if (!((byte >= 32 && byte <= 126) || byte === 13 || byte === 10 || byte === 9)) {
+                        isText = false;
+                        break;
+                    }
+                }
+                
+                if (isText && data.length > 0) {
+                    const text = new TextDecoder().decode(data).trim();
+                    if (text) {
+                        this.processTextMessage(text);
+                    }
+                }
+            }
+
+            processTextMessage(text) {
+                // Handle encoder updates
+                if (text.startsWith('ENC:')) {
+                    const match = text.match(/ENC:(\d+):(-?\d+)/);
+                    if (match) {
+                        const encoder = parseInt(match[1]) - 1;
+                        const delta = parseInt(match[2]);
+                        if (encoder >= 0 && encoder < 4) {
+                            this.encoderValues[encoder] += delta;
+                            document.getElementById(`enc${encoder}`).textContent = this.encoderValues[encoder];
+                        }
+                    }
+                }
+                
+                // Handle position updates from Arc
+                if (text.startsWith('POS:')) {
+                    const match = text.match(/POS:(\d+):(\d+)/);
+                    if (match) {
+                        const ring = parseInt(match[1]) - 1;
+                        const position = parseInt(match[2]) - 1; // Convert to 0-based
+                        if (ring >= 0 && ring < 4 && position >= 0 && position < 64) {
+                            this.setLedPosition(ring, position);
+                        }
+                    }
+                }
+                
+                // Handle LED updates from Arc (legacy)
+                if (text.startsWith('LED:')) {
+                    const match = text.match(/LED:(\d+):(\d+)/);
+                    if (match) {
+                        const ring = parseInt(match[1]) - 1;
+                        const brightness = parseInt(match[2]);
+                        if (ring >= 0 && ring < 4) {
+                            this.setRingBrightness(ring, brightness);
+                        }
+                    }
+                }
+                
+                // Log other messages
+                if (!text.startsWith('ENC:') && !text.startsWith('POS:') && !text.startsWith('LED:')) {
+                    this.log(text);
+                }
+            }
+
+            setLedPosition(ring, position) {
+                // Clear all LEDs in the ring
+                for (let i = 0; i < 64; i++) {
+                    this.ledStates[ring][i] = 0;
+                }
+                // Set only the LED at the current position
+                this.ledStates[ring][position] = 15;
+                this.updateRingDisplay(ring);
+            }
+
+            setRingBrightness(ring, brightness) {
+                // Update all LEDs in the ring to the same brightness
+                for (let i = 0; i < 64; i++) {
+                    this.ledStates[ring][i] = brightness;
+                }
+                this.updateRingDisplay(ring);
+            }
+
+            updateRingDisplay(ring) {
+                const ringEl = document.getElementById(`ring${ring}`);
+                const leds = ringEl.querySelectorAll('.led');
+                
+                leds.forEach((led, i) => {
+                    const brightness = this.ledStates[ring][i];
+                    if (brightness > 0) {
+                        led.classList.add('on');
+                        led.style.opacity = brightness / 15;
+                    } else {
+                        led.classList.remove('on');
+                        led.style.opacity = 1;
+                    }
+                });
+            }
+
+            async takeControl() {
+                this.log('Taking control of Arc...');
+                
+                const commands = [
+                    // Stop all metros and disable default functions
+                    'metro.allstop()',
+                    'old_tick = tick; tick = function() end',
+                    'old_redraw = redraw; redraw = function() end',
+                    
+                    // Initialize LED positions (1-64 for each ring)
+                    'led_pos = {1, 1, 1, 1}',
+                    
+                    // Function to update ring LEDs
+                    'function update_ring(n) ' +
+                        'arc_led_all(n, 0); ' +
+                        'arc_led(n, led_pos[n], 15); ' +
+                        'arc_refresh(); ' +
+                        'print(string.format("POS:%d:%d", n, led_pos[n])) ' +
+                    'end',
+                    
+                    // Set up encoder handler that moves LED position
+                    'arc = function(n, d) ' +
+                        'led_pos[n] = ((led_pos[n] - 1 + d) % 64) + 1; ' +
+                        'if led_pos[n] < 1 then led_pos[n] = led_pos[n] + 64 end; ' +
+                        'update_ring(n); ' +
+                        'print(string.format("ENC:%d:%d", n, d)) ' +
+                    'end',
+                    
+                    // Set initial LED state
+                    'for i=1,4 do update_ring(i) end',
+                    
+                    // Confirm control
+                    'print("Arc controlled! Turn encoders to move LEDs around rings.")'
+                ];
+                
+                for (const cmd of commands) {
+                    await this.sendCommand(cmd);
+                    await new Promise(r => setTimeout(r, 200));
+                }
+                
+                this.controlled = true;
+                this.log('Arc control active - encoders move LEDs around rings');
+            }
+
+            async sendCommand(cmd) {
+                if (!this.writer) return;
+                
+                try {
+                    const bytes = new TextEncoder().encode(cmd + '\r\n');
+                    await this.writer.write(bytes);
+                } catch (error) {
+                    this.log(`Send error: ${error.message}`);
+                }
+            }
+
+            updateStatus() {
+                const status = document.getElementById('status');
+                const connectBtn = document.getElementById('connectBtn');
+                const disconnectBtn = document.getElementById('disconnectBtn');
+                
+                if (this.connected) {
+                    status.textContent = 'Connected';
+                    status.className = 'connected';
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                } else {
+                    status.textContent = 'Disconnected';
+                    status.className = 'disconnected';
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                }
+            }
+
+            log(message) {
+                const logEl = document.getElementById('log');
+                const timestamp = new Date().toLocaleTimeString();
+                logEl.textContent += `[${timestamp}] ${message}\n`;
+                logEl.scrollTop = logEl.scrollHeight;
+                
+                // Limit log size
+                const lines = logEl.textContent.split('\n');
+                if (lines.length > 100) {
+                    logEl.textContent = lines.slice(-100).join('\n');
+                }
+            }
+        }
+
+        // Initialize
+        if ('serial' in navigator) {
+            window.arcControl = new ArcControl();
+        } else {
+            document.body.innerHTML = '<h1 style="color: #f00;">Web Serial API not supported. Use Chrome/Edge with experimental features enabled.</h1>';
+        }
+    </script>
+</body>
+</html>
